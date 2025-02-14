@@ -1,0 +1,9 @@
+{
+  "latestGeojson": "list_841_14-02-2025.geojson",
+  "featuresCount": 841,
+  "latestUpdate": "14-02-2025",
+  "markerImages": {
+    "default": "custom-marker.png",
+    "hover": "custom-marker-hover.png"
+  }
+}
