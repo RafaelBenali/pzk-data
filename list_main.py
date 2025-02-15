@@ -13,21 +13,30 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, parse_qs
 from rapidfuzz import process, fuzz
 from dateutil import parser
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
+
+# -----------------------------------------------------------------------------
+# Persistent disk configuration
+# -----------------------------------------------------------------------------
+PERSISTENT_DIR = "/var/map"
+if not os.path.exists(PERSISTENT_DIR):
+    os.makedirs(PERSISTENT_DIR)
+
+# Files stored on persistent disk
+LOG_FILE = os.path.join(PERSISTENT_DIR, "pipeline.log")
+IMAGES_DIR = os.path.join(PERSISTENT_DIR, "images")
+if not os.path.exists(IMAGES_DIR):
+    os.makedirs(IMAGES_DIR)
 
 # -----------------------------------------------------------------------------
 # GLOBAL CONFIG / LOGGING / GLOBAL COUNTERS
 # -----------------------------------------------------------------------------
-
 URL_1 = "https://memopzk.org/list-persecuted/spisok-politzaklyuchyonnyh-presleduemyh-za-religiyu/?download"
 URL_2 = "https://memopzk.org/list-persecuted/spisok-politzaklyuchyonnyh-bez-presleduemyh-za-religiyu/?download"
 
 FALLBACK_COORDS = [96.712933, 62.517018]
 FUZZY_THRESHOLD = 70
 INTERACTIVE_MODE = False
-LOG_FILE = "pipeline.log"
-REFERENCE_GEOJSON_FILE = "ospace.addresses.geojson"
-IMAGES_DIR = "images"
 
 ERROR_COUNT = 0  # Global error counter
 
@@ -140,7 +149,7 @@ def parse_geojson_date(fname):
         return None
 
 def get_latest_geojson():
-    files = [f for f in os.listdir('.') if f.startswith("list_") and f.endswith(".geojson")]
+    files = [f for f in os.listdir(PERSISTENT_DIR) if f.startswith("list_") and f.endswith(".geojson")]
     valid = []
     for f in files:
         dt = parse_geojson_date(f)
@@ -148,7 +157,8 @@ def get_latest_geojson():
             valid.append((f, dt))
     if not valid:
         return None
-    return max(valid, key=lambda x: x[1])[0]
+    latest = max(valid, key=lambda x: x[1])[0]
+    return os.path.join(PERSISTENT_DIR, latest)
 
 def load_geojson(fname):
     if not fname or not os.path.exists(fname):
@@ -596,7 +606,7 @@ def date_cleaning_all_features(features):
 # UPDATE FEATURES FROM LIVE TELEGRAM SCRAPING
 # -----------------------------------------------------------------------------
 def get_latest_telegram_address_file():
-    files = [f for f in os.listdir('.') if f.startswith("address_") and f.endswith(".json")]
+    files = [f for f in os.listdir(PERSISTENT_DIR) if f.startswith("address_") and f.endswith(".json")]
     valid = []
     for f in files:
         match = re.match(r'address_(\d{2}-\d{2}-\d{4})\.json', f)
@@ -609,7 +619,7 @@ def get_latest_telegram_address_file():
     if not valid:
         return None, None
     latest_file, latest_date = max(valid, key=lambda x: x[1])
-    return latest_file, latest_date
+    return os.path.join(PERSISTENT_DIR, latest_file), latest_date
 
 def normalize_url(url):
     url = url.replace("https://storage.googleapis.com/kldscp/", "https://")
@@ -743,7 +753,7 @@ def update_new_features_with_telegram(features):
         logger.info("No new Telegram posts to update features.")
         return
     post_time, telegram_items = result
-    new_file = f"address_{post_time.strftime('%d-%m-%Y')}.json"
+    new_file = os.path.join(PERSISTENT_DIR, f"address_{post_time.strftime('%d-%m-%Y')}.json")
     try:
         with open(new_file, "w", encoding="utf-8") as f:
             json.dump(telegram_items, f, ensure_ascii=False, indent=4)
@@ -790,7 +800,7 @@ def remove_unused_images_in_final_geojson(geojson_data):
 # Apply manual overrides from overrides.json
 # -----------------------------------------------------------------------------
 def apply_overrides(geojson_data):
-    overrides_file = "overrides.json"
+    overrides_file = os.path.join(PERSISTENT_DIR, "overrides.json")
     if os.path.exists(overrides_file):
         try:
             with open(overrides_file, "r", encoding="utf-8") as f:
@@ -983,7 +993,8 @@ def generate_overrides(ids_str):
     if not overrides:
         return {"error": "No matching features found for the given IDs."}
     try:
-        with open("overrides.json", "w", encoding="utf-8") as f:
+        overrides_file = os.path.join(PERSISTENT_DIR, "overrides.json")
+        with open(overrides_file, "w", encoding="utf-8") as f:
             json.dump(overrides, f, ensure_ascii=False, indent=4)
         return {"message": "overrides.json generated", "ids": list(overrides.keys())}
     except Exception as e:
@@ -1004,8 +1015,8 @@ def main():
         date_str = datetime.now().strftime('%d-%m-%Y')
 
     # (B) Load existing GeoJSON
-    old_geojson_file = get_latest_geojson()  # possibly None
-    old_data = load_geojson(old_geojson_file)
+    old_geojson_file = get_latest_geojson()  # returns full path or None
+    old_data = load_geojson(old_geojson_file) if old_geojson_file else {"type": "FeatureCollection", "features": []}
     old_ids = extract_ids_from_geojson(old_data)
 
     # (C) Extract IDs from CSV, compare
@@ -1045,9 +1056,10 @@ def main():
     # (F.5) Apply manual overrides if available
     old_data = apply_overrides(old_data)
 
-    # (G) Save final GeoJSON
+    # (G) Save final GeoJSON to persistent disk
     final_geojson_name = f"list_{len(csv_ids)}_{date_str}.geojson"
-    save_geojson(old_data, final_geojson_name)
+    final_geojson_path = os.path.join(PERSISTENT_DIR, final_geojson_name)
+    save_geojson(old_data, final_geojson_path)
     remove_unused_images_in_final_geojson(old_data)
     logger.info("Pipeline complete.")
     logger.info(f"Run Summary: New IDs: {len(added_ids)}, Removed IDs: {len(removed_ids)}, Errors: {ERROR_COUNT}")
@@ -1069,18 +1081,15 @@ def main():
         logger.info("New Features Summary: GeocodeStatus: %s", new_geocode_status)
         logger.info("New Features Summary: DateStatus: %s", new_date_status)
 
-    # Generate manifest.json with metadata for the frontend
+    # Generate manifest.json without markerImages
     manifest = {
         "latestGeojson": final_geojson_name,
         "featuresCount": len(old_data.get("features", [])),
-        "latestUpdate": date_str,
-        "markerImages": {
-            "default": "custom-marker.png",
-            "hover": "custom-marker-hover.png"
-        }
+        "latestUpdate": date_str
     }
+    manifest_path = os.path.join(PERSISTENT_DIR, "manifest.json")
     try:
-        with open("manifest.json", "w", encoding="utf-8") as mf:
+        with open(manifest_path, "w", encoding="utf-8") as mf:
             json.dump(manifest, mf, ensure_ascii=False, indent=2)
         logger.info("Manifest saved as manifest.json")
     except Exception as e:
@@ -1095,7 +1104,7 @@ def main():
     }
 
 # -----------------------------------------------------------------------------
-# Flask Web Service Endpoints
+# Flask Web Service Endpoints and Static File Serving
 # -----------------------------------------------------------------------------
 app = Flask(__name__)
 
@@ -1118,7 +1127,7 @@ def find_route():
     if not query:
         return jsonify({"error": "Missing query parameter"}), 400
     result = find_id(query)
-    status_code = 200 if "found_ids" in result or "message" in result and "No matching" not in result.get("message", "") else 404
+    status_code = 200 if "found_ids" in result or ("message" in result and "No matching" not in result.get("message", "")) else 404
     return jsonify(result), status_code
 
 @app.route("/geocode/<feature_id>", methods=["POST"])
@@ -1141,6 +1150,29 @@ def generate_overrides_route():
     result = generate_overrides(content["ids"])
     status_code = 200 if "message" in result else 404
     return jsonify(result), status_code
+
+# -----------------------------------------------------------------------------
+# Static File Endpoints
+# -----------------------------------------------------------------------------
+@app.route("/manifest.json")
+def serve_manifest():
+    return send_from_directory(PERSISTENT_DIR, "manifest.json")
+
+@app.route("/geojson/<path:filename>")
+def serve_geojson(filename):
+    return send_from_directory(PERSISTENT_DIR, filename)
+
+@app.route("/images/<path:filename>")
+def serve_images(filename):
+    return send_from_directory(IMAGES_DIR, filename)
+
+@app.route("/overrides.json")
+def serve_overrides():
+    return send_from_directory(PERSISTENT_DIR, "overrides.json")
+
+@app.route("/pipeline.log")
+def serve_log():
+    return send_from_directory(PERSISTENT_DIR, "pipeline.log")
 
 # -----------------------------------------------------------------------------
 # Run the Flask App
