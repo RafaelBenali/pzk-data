@@ -14,6 +14,7 @@ from urllib.parse import urlparse, parse_qs
 from rapidfuzz import process, fuzz
 from dateutil import parser
 from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 
 # -----------------------------------------------------------------------------
 # Persistent disk configuration
@@ -1109,6 +1110,7 @@ def main():
 # Flask Web Service Endpoints and Static File Serving
 # -----------------------------------------------------------------------------
 app = Flask(__name__)
+CORS(app)
 
 @app.route("/")
 def index():
