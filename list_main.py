@@ -1158,7 +1158,7 @@ def generate_overrides_route():
 def serve_manifest():
     return send_from_directory(PERSISTENT_DIR, "manifest.json")
 
-@app.route("/geojson/<path:filename>")
+@app.route("/<path:filename>")
 def serve_geojson(filename):
     return send_from_directory(PERSISTENT_DIR, filename)
 
