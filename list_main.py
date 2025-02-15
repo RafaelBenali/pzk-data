@@ -593,7 +593,7 @@ def date_cleaning_all_features(features):
         feat["properties"] = props
 
 # -----------------------------------------------------------------------------
-# NEW STEP: UPDATE FEATURES FROM LIVE TELEGRAM SCRAPING
+# 7) UPDATE FEATURES FROM LIVE TELEGRAM SCRAPING
 # -----------------------------------------------------------------------------
 def get_latest_telegram_address_file():
     files = [f for f in os.listdir('.') if f.startswith("address_") and f.endswith(".json")]
@@ -728,10 +728,9 @@ def extract_address_items(text_div):
 
 def update_new_features_with_telegram(features):
     """
-    Scrape Telegram live and update ANY feature (old or new) whose sourceUrl matches a Telegram link.
+    Scrape Telegram live and update ALL features (old and new) whose sourceUrl matches a Telegram link.
     Also, save the new Telegram data into a JSON file.
     """
-    # Use existing Telegram file (if any) to define a cutoff date.
     existing_file, existing_date = get_latest_telegram_address_file()
     if existing_date is not None:
         cutoff = existing_date.replace(tzinfo=timezone.utc)
@@ -751,7 +750,6 @@ def update_new_features_with_telegram(features):
         logger.info("Saved new Telegram addresses to %s", new_file)
     except Exception as e:
         logger.error("Error saving Telegram addresses file: %s", e)
-    # Update all features whose sourceUrl matches a Telegram link.
     for item in telegram_items:
         t_link = normalize_url(item.get("link", ""))
         t_postcode = item.get("postcode", "").strip()
@@ -800,7 +798,6 @@ def apply_overrides(geojson_data):
         except Exception as e:
             log_error(f"Error loading overrides.json: {e}")
             return geojson_data
-        # Assume overrides is a dict keyed by ID
         for feat in geojson_data.get("features", []):
             props = feat.get("properties", {})
             feat_id = str(props.get("ID", ""))
@@ -956,7 +953,6 @@ def manual_geocode(feature_id):
     if not found:
         print(f"Feature with ID={feature_id} not found.")
     else:
-        # Overwrite the existing file
         save_geojson(data, latest_geojson_file)
         print(f"Existing geojson {latest_geojson_file} updated with new geocoding for ID {feature_id}.")
 
@@ -983,7 +979,6 @@ def generate_overrides(ids_str):
         props = feat.get("properties", {})
         feat_id = str(props.get("ID", ""))
         if feat_id in id_list:
-            # Duplicate current data as override (user can later edit these values)
             overrides[feat_id] = props
     if not overrides:
         print("No matching features found for the given IDs.")
@@ -999,7 +994,6 @@ def generate_overrides(ids_str):
 # 8) MAIN PIPELINE
 # -----------------------------------------------------------------------------
 def main():
-    # (A) Create merged CSV
     merged_csv = create_merged_csv()
     if not merged_csv:
         log_error("No merged CSV. Exiting.")
@@ -1009,12 +1003,10 @@ def main():
     if not date_str:
         date_str = datetime.now().strftime('%d-%m-%Y')
 
-    # (B) Load existing GeoJSON
     old_geojson_file = get_latest_geojson()  # possibly None
     old_data = load_geojson(old_geojson_file)
     old_ids = extract_ids_from_geojson(old_data)
 
-    # (C) Extract IDs from CSV, compare
     csv_ids = extract_ids_from_csv(merged_csv)
     added_ids, removed_ids = diff_ids(csv_ids, old_ids)
     logger.info(f"ADDED IDs: {added_ids}")
@@ -1022,7 +1014,6 @@ def main():
 
     new_features = []
     if added_ids:
-        # (D) Scrape & process ONLY the added IDs
         new_features = scrape_new_ids(added_ids, merged_csv)
         date_cleaning_all_features(new_features)
         ref_dict = load_reference_geojson(REFERENCE_GEOJSON_FILE)
@@ -1030,7 +1021,6 @@ def main():
     else:
         logger.info("No new IDs to scrape or geocode.")
 
-    # (E) Remove removed IDs from old GeoJSON
     if removed_ids:
         filtered_features = []
         for feat in old_data.get("features", []):
@@ -1040,25 +1030,19 @@ def main():
                 filtered_features.append(feat)
         old_data["features"] = filtered_features
 
-    # (F) Append new features into old_data
     all_features = old_data.get("features", [])
     all_features.extend(new_features)
     old_data["features"] = all_features
 
-    # NEW STEP: Update ALL features using LIVE Telegram scraping
     update_new_features_with_telegram(old_data["features"])
-
-    # (F.5) Apply manual overrides if available
     old_data = apply_overrides(old_data)
 
-    # (G) Save final GeoJSON
     final_geojson_name = f"list_{len(csv_ids)}_{date_str}.geojson"
     save_geojson(old_data, final_geojson_name)
     remove_unused_images_in_final_geojson(old_data)
     logger.info("Pipeline complete.")
     logger.info(f"Run Summary: New IDs: {len(added_ids)}, Removed IDs: {len(removed_ids)}, Errors: {ERROR_COUNT}")
 
-    # (H) For newly added features, summarize status fields.
     if new_features:
         new_postcode_status = {}
         new_geocode_status = {}
@@ -1075,24 +1059,27 @@ def main():
         logger.info("New Features Summary: GeocodeStatus: %s", new_geocode_status)
         logger.info("New Features Summary: DateStatus: %s", new_date_status)
 
-    # -------------------------------------------------------------------------
-    # NEW STEP: Generate manifest.json with metadata for the frontend
-    # -------------------------------------------------------------------------
-    manifest = {
-        "latestGeojson": final_geojson_name,
-        "featuresCount": len(old_data.get("features", [])),
-        "latestUpdate": date_str,
-        "markerImages": {
-            "default": "custom-marker.png",
-            "hover": "custom-marker-hover.png"
-        }
-    }
-    try:
-        with open("manifest.json", "w", encoding="utf-8") as mf:
-            json.dump(manifest, mf, ensure_ascii=False, indent=2)
-        logger.info("Manifest saved as manifest.json")
-    except Exception as e:
-        log_error(f"Error saving manifest.json: {e}")
+# -----------------------------------------------------------------------------
+# NEW FUNCTION: Run as a Web Service (Flask)
+# -----------------------------------------------------------------------------
+def run_web_service():
+    from flask import Flask, jsonify
+    app = Flask(__name__)
+
+    @app.route("/")
+    def index():
+        return "Hello, world! This is the pipeline web service."
+
+    @app.route("/run", methods=["GET"])
+    def run_pipeline():
+        try:
+            main()
+            return jsonify({"status": "success", "message": "Pipeline run complete."})
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
+
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
 
 # -----------------------------------------------------------------------------
 # CLI Argument Parsing for additional commands
@@ -1102,17 +1089,14 @@ if __name__ == "__main__":
     subparsers = parser.add_subparsers(dest="command")
 
     parser_run = subparsers.add_parser("run", help="Run the entire pipeline")
-
     parser_find = subparsers.add_parser("find", help="Find an ID by name or link")
     parser_find.add_argument("query", help="Name or link to search for")
-
     parser_geocode = subparsers.add_parser("geocode", help="Run geocode function on an inputted ID")
     parser_geocode.add_argument("id", help="ID to geocode")
-
     parser_overrides = subparsers.add_parser("apply_overrides", help="Manually apply Overrides Feature to geojson")
-
     parser_gen_overrides = subparsers.add_parser("generate_overrides", help="Generate an overrides.json file for specified IDs")
     parser_gen_overrides.add_argument("ids", help="Comma-separated list of IDs to override")
+    parser_web = subparsers.add_parser("web", help="Run as a web service")
 
     args = parser.parse_args()
 
@@ -1126,5 +1110,7 @@ if __name__ == "__main__":
         manual_apply_overrides()
     elif args.command == "generate_overrides":
         generate_overrides(args.ids)
+    elif args.command == "web":
+        run_web_service()
     else:
         parser.print_help()
