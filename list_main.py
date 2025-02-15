@@ -28,6 +28,8 @@ IMAGES_DIR = os.path.join(PERSISTENT_DIR, "images")
 if not os.path.exists(IMAGES_DIR):
     os.makedirs(IMAGES_DIR)
 
+REFERENCE_GEOJSON_FILE = os.path.join(PERSISTENT_DIR, "ospace.addresses.geojson")
+
 # -----------------------------------------------------------------------------
 # GLOBAL CONFIG / LOGGING / GLOBAL COUNTERS
 # -----------------------------------------------------------------------------
