@@ -288,7 +288,7 @@ def scrape_one_id(page_id, url):
     dossier_art = soup.find('div', class_='human-dossier__art')
     if dossier_art:
         for p_tag in dossier_art.find_all('p'):
-            p_text = p_tag.get_text(" ", strip=True)
+            p_text = p_tag.get_text(strip=True)
             if p_text and p_text not in main_paragraphs:
                 main_paragraphs.append(p_text)
     if main_paragraphs:
@@ -306,14 +306,14 @@ def scrape_one_id(page_id, url):
             if label:
                 tags.append(label)
     record["tags"] = tags
-    # 5) Address – DEDUPLICATED
+    # 5) Address – DEDUPLICATED (updated to ignore empty paragraphs)
     address_pars = []
     modal_div = soup.find('div', attrs={'data-modal': 'letter'})
     if modal_div:
         modal_content = modal_div.find('div', class_='modal-content')
         if modal_content:
             for p_tag in modal_content.find_all('p'):
-                p_text = p_tag.get_text(" ", strip=True)
+                p_text = p_tag.get_text(strip=True)
                 if p_text and p_text not in address_pars:
                     address_pars.append(p_text)
     if address_pars:
@@ -1083,6 +1083,12 @@ def main():
         logger.info("New Features Summary: PostcodeStatus: %s", new_postcode_status)
         logger.info("New Features Summary: GeocodeStatus: %s", new_geocode_status)
         logger.info("New Features Summary: DateStatus: %s", new_date_status)
+        # (H.5) Auto-generate overrides.json for new features
+        new_ids_list = [str(feat.get("properties", {}).get("ID", "")) for feat in new_features if feat.get("properties", {}).get("ID", "")]
+        if new_ids_list:
+            new_ids_str = ",".join(new_ids_list)
+            gen_result = generate_overrides(new_ids_str)
+            logger.info(f"Generated overrides: {gen_result}")
 
     # Generate manifest.json without markerImages
     manifest = {
@@ -1155,6 +1161,31 @@ def generate_overrides_route():
     status_code = 200 if "message" in result else 404
     return jsonify(result), status_code
 
+# New route to update the "date" for a given feature ID.
+@app.route("/update_date", methods=["POST"])
+def update_date_route():
+    data = request.get_json()
+    if not data or "id" not in data or "new_date" not in data:
+        return jsonify({"error": "JSON payload must contain 'id' and 'new_date'"}), 400
+    feature_id = str(data["id"])
+    new_date = data["new_date"]
+    latest_geojson_file = get_latest_geojson()
+    if not latest_geojson_file:
+        return jsonify({"error": "No geojson found."}), 404
+    geojson_data = load_geojson(latest_geojson_file)
+    updated = False
+    for feat in geojson_data.get("features", []):
+        props = feat.get("properties", {})
+        if str(props.get("ID", "")) == feature_id:
+            props["date"] = new_date
+            props["dateStatus"] = "True"
+            feat["properties"] = props
+            updated = True
+    if not updated:
+        return jsonify({"error": f"Feature with ID {feature_id} not found."}), 404
+    save_geojson(geojson_data, latest_geojson_file)
+    return jsonify({"message": f"Updated date for feature ID {feature_id}."})
+
 # -----------------------------------------------------------------------------
 # Static File Endpoints
 # -----------------------------------------------------------------------------
@@ -1182,4 +1213,6 @@ def serve_log():
 # Run the Flask App
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
+    # For Render.com deployment, schedule a cron job (via Render's Cron Jobs)
+    # to POST to the "/run" endpoint daily.
     app.run(host="0.0.0.0", port=5000, debug=True)
