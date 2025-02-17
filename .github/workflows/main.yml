@@ -3,7 +3,7 @@ name: Daily POST Request
 # Trigger on a schedule (daily at midnight UTC) and also allow manual dispatch.
 on:
   schedule:
-    - cron: '43 06 * * *'
+    - cron: '58 06 * * *'
   workflow_dispatch:
 
 jobs:
