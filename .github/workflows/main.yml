@@ -1,8 +1,8 @@
-name: Daily POST Request
+name: Daily POST Request with Heartbeat
 
 on:
   schedule:
-    - cron: '10 6 * * *'  # runs daily at midnight UTC
+    - cron: '30 6 * * *'   
   workflow_dispatch:
 
 jobs:
@@ -10,7 +10,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Send POST request with heartbeat
+      - name: Run POST request with heartbeat
         run: |
-          (while true; do echo "Heartbeat: $(date)"; sleep 60; done) &
-          curl --max-time 1800 -X POST https://pzk-data.onrender.com/run
+          echo "Starting heartbeat..."
+          # Use stdbuf to force line-buffered output so the heartbeat appears in logs
+          stdbuf -oL bash -c "while true; do echo \"Heartbeat: $(date)\"; sleep 60; done" &
+          HEART_PID=$!
+          echo "Running curl..."
+          # Run curl with verbose output and a max time of 1800 seconds (30 minutes)
+          curl --verbose --max-time 1800 -X POST https://pzk-data.onrender.com/run
+          echo "Curl finished, killing heartbeat"
+          kill $HEART_PID || true
