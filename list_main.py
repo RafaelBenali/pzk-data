@@ -306,21 +306,22 @@ def scrape_one_id(page_id, url):
             if label:
                 tags.append(label)
     record["tags"] = tags
-    # 5) Address – DEDUPLICATED (updated to ignore empty paragraphs)
+    # 5) Address  
     address_pars = []
     modal_div = soup.find('div', attrs={'data-modal': 'letter'})
     if modal_div:
         modal_content = modal_div.find('div', class_='modal-content')
         if modal_content:
             for p_tag in modal_content.find_all('p'):
-                p_text = p_tag.get_text(strip=True)
-                if p_text and p_text not in address_pars:
-                    address_pars.append(p_text)
+                inner_html = p_tag.decode_contents().strip()  
+                if inner_html and inner_html not in address_pars:
+                    address_pars.append(inner_html)
     if address_pars:
         composite_address = "\n".join(f"<p>{p}</p>" for p in address_pars)
         record["address"] = [composite_address]
     else:
         record["address"] = []
+
     # 6) Blog link
     linkink = ""
     dossier_card = soup.find('div', class_='human-dossier-card')
