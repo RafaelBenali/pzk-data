@@ -1,8 +1,8 @@
 name: Daily POST Request
- 
+
 on:
   schedule:
-    - cron: '40 5 * * *'
+    - cron: '10 6 * * *'  # runs daily at midnight UTC
   workflow_dispatch:
 
 jobs:
@@ -10,5 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Send POST request to /run endpoint
-        run: curl -X POST https://pzk-data.onrender.com/run
+      - name: Send POST request with heartbeat
+        run: |
+          (while true; do echo "Heartbeat: $(date)"; sleep 60; done) &
+          curl --max-time 1800 -X POST https://pzk-data.onrender.com/run
