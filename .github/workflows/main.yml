@@ -2,7 +2,7 @@ name: Daily POST Request
  
 on:
   schedule:
-    - cron: '30 05 * * *'
+    - cron: '40 5 * * *'
   workflow_dispatch:
 
 jobs:
