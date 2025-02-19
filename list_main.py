@@ -84,7 +84,7 @@ def robust_get(url, max_retries=3, initial_delay=1, **kwargs):
 # -----------------------------------------------------------------------------
 def download_file(url):
     try:
-        resp = robust_get(url, timeout=15)
+        resp = robust_get(url, timeout=10)
     except Exception as e:
         log_error(f"Failed to download from {url}: {e}")
         return None
@@ -121,7 +121,7 @@ def merge_two_csvs(file1, file2):
 
 def create_merged_csv():
     file1 = download_file(URL_1)
-    time.sleep(15)  # pause increased to 15s
+    time.sleep(10)  
     file2 = download_file(URL_2)
     if not file1 or not file2:
         log_error("Error downloading one or both CSV files.")
@@ -217,7 +217,7 @@ def diff_ids(csv_ids, geojson_ids):
 def fetch_updated_link(page_id):
     json_url = f"https://memopzk.org/wp-json/wp/v2/figurant/{page_id}"
     try:
-        resp = robust_get(json_url, timeout=15)
+        resp = robust_get(json_url, timeout=10)
         data = resp.json()
         updated_link = data.get("link", "")
         if updated_link:
@@ -228,7 +228,7 @@ def fetch_updated_link(page_id):
     except Exception as e:
         log_error(f"[UPDATE_LINK] Error fetching updated link for ID={page_id}: {e}")
         updated_link = f"https://memopzk.org/?p={page_id}"
-    time.sleep(15)
+    time.sleep(10)
     return updated_link
 
 # -----------------------------------------------------------------------------
@@ -379,7 +379,7 @@ def scrape_new_ids(new_ids, csv_file):
         }
         new_features.append(feature)
         logger.info(f"[SCRAPE] ID={page_id} done ({i}/{len(new_ids)})")
-        time.sleep(15)
+        time.sleep(10)
     return new_features
 
 # -----------------------------------------------------------------------------
