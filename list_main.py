@@ -21,7 +21,7 @@ from collections import OrderedDict
 # -----------------------------------------------------------------------------
 # Persistent disk configuration
 # -----------------------------------------------------------------------------
-PERSISTENT_DIR = "."
+PERSISTENT_DIR = "/var/map"
 if not os.path.exists(PERSISTENT_DIR):
     os.makedirs(PERSISTENT_DIR)
 
@@ -41,7 +41,7 @@ URL_2 = "https://memopzk.org/list-persecuted/spisok-politzaklyuchyonnyh-bez-pres
 
 FALLBACK_COORDS = [96.712933, 62.517018]
 FUZZY_THRESHOLD = 70
-INTERACTIVE_MODE = True
+INTERACTIVE_MODE = False
 
 ERROR_COUNT = 0  # Global error counter
 
