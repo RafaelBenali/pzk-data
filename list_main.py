@@ -16,10 +16,12 @@ from dateutil import parser
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
+from collections import OrderedDict
+
 # -----------------------------------------------------------------------------
 # Persistent disk configuration
 # -----------------------------------------------------------------------------
-PERSISTENT_DIR = "/var/map"
+PERSISTENT_DIR = "."
 if not os.path.exists(PERSISTENT_DIR):
     os.makedirs(PERSISTENT_DIR)
 
@@ -39,7 +41,7 @@ URL_2 = "https://memopzk.org/list-persecuted/spisok-politzaklyuchyonnyh-bez-pres
 
 FALLBACK_COORDS = [96.712933, 62.517018]
 FUZZY_THRESHOLD = 70
-INTERACTIVE_MODE = False
+INTERACTIVE_MODE = True
 
 ERROR_COUNT = 0  # Global error counter
 
@@ -60,6 +62,11 @@ def log_error(message):
     ERROR_COUNT += 1
     logger.error(message)
 
+def wrap_paragraph(html):
+    # If the content already starts with <p> and ends with </p>, return as is.
+    if html.startswith("<p>") and html.endswith("</p>"):
+        return html
+    return f"<p>{html}</p>"
 
 # -----------------------------------------------------------------------------
 # Helper: robust_get() with retries and exponential backoff
@@ -250,7 +257,35 @@ def build_id_url_map(csv_file):
         if m:
             the_id = m.group(1)
             id_map[the_id] = url
-    return id_map
+    return id_map 
+ 
+
+def get_unique_main_paragraphs(soup):
+    """
+    Extracts paragraphs from the 'human-dossier__art' div.
+    Deduplicates paragraphs based on their rendered text,
+    but keeps the original HTML intact. This function preserves empty <p> tags:
+      - If multiple empty paragraphs exist, only the first empty tag is kept.
+      - Non-empty paragraphs are deduplicated by their plain text.
+    """
+    dossier_art = soup.find('div', class_='human-dossier__art')
+    if not dossier_art:
+        return []
+    
+    unique_paragraphs = OrderedDict()
+    empty_key = "__empty__"
+    
+    for p in dossier_art.find_all('p'):
+        plain_text = p.get_text(strip=True)
+        # Check if the paragraph is "empty" (empty string or only &nbsp;)
+        if not plain_text or plain_text == '\xa0':
+            # Use a dedicated key for empty paragraphs so that we keep the first occurrence
+            if empty_key not in unique_paragraphs:
+                unique_paragraphs[empty_key] = str(p)
+        else:
+            if plain_text not in unique_paragraphs:
+                unique_paragraphs[plain_text] = str(p)
+    return list(unique_paragraphs.values())
 
 def scrape_one_id(page_id, url):
     record = {
@@ -266,14 +301,16 @@ def scrape_one_id(page_id, url):
         return record
 
     soup = BeautifulSoup(resp.text, 'html.parser')
-    # 1) Name
+
+    # 1) Name extraction
     name_div = soup.find('div', class_='human-dossier__name')
     if name_div:
         h1 = name_div.find('h1', class_='title title--lg')
         record["name"] = h1.get_text(strip=True) if h1 else "N/A"
     else:
         record["name"] = "N/A"
-    # 2) Clauses
+
+    # 2) Clauses – remove nested tooltip texts before extracting text
     clauses = []
     clause_list = soup.find('ul', class_='clause__list')
     if clause_list:
@@ -281,22 +318,23 @@ def scrape_one_id(page_id, url):
         for it in items:
             sp = it.find('span')
             if sp:
-                clauses.append(sp.get_text(strip=True))
+                for tooltip in sp.find_all(class_='tooltip-text'):
+                    tooltip.decompose()
+                clause_text = sp.get_text(strip=True)
+                if clause_text:
+                    clauses.append(clause_text)
     record["clauses"] = clauses
-    # 3) Main paragraphs – DEDUPLICATED
-    main_paragraphs = []
-    dossier_art = soup.find('div', class_='human-dossier__art')
-    if dossier_art:
-        for p_tag in dossier_art.find_all('p'):
-            p_text = p_tag.get_text(strip=True)
-            if p_text and p_text not in main_paragraphs:
-                main_paragraphs.append(p_text)
-    if main_paragraphs:
-        composite_main = "\n".join(f"<p>{p}</p>" for p in main_paragraphs)
-        record["main"] = [composite_main]
+
+    # 3) Main paragraphs – deduplicate by rendered text but keep original HTML.
+    #     This function now keeps the original empty <p> tag.
+    unique_paragraphs = get_unique_main_paragraphs(soup)
+    if unique_paragraphs:
+        # Join the paragraphs with newlines.
+        record["main"] = ["\n".join(unique_paragraphs)]
     else:
         record["main"] = []
-    # 4) Tags
+
+    # 4) Tags extraction
     tags = []
     dossier_list = soup.find('ul', class_='dossier-info__list')
     if dossier_list:
@@ -306,23 +344,27 @@ def scrape_one_id(page_id, url):
             if label:
                 tags.append(label)
     record["tags"] = tags
-    # 5) Address  
+
+    # 5) Address – deduplicate by comparing stripped text and keep original HTML.
     address_pars = []
     modal_div = soup.find('div', attrs={'data-modal': 'letter'})
     if modal_div:
         modal_content = modal_div.find('div', class_='modal-content')
         if modal_content:
+            seen_address_texts = set()
             for p_tag in modal_content.find_all('p'):
-                inner_html = p_tag.decode_contents().strip()  
-                if inner_html and inner_html not in address_pars:
-                    address_pars.append(inner_html)
+                plain_text = p_tag.get_text(strip=True)
+                # Even empty paragraphs will be kept (only first occurrence)
+                key = plain_text if plain_text else "__empty__"
+                if key not in seen_address_texts:
+                    seen_address_texts.add(key)
+                    address_pars.append(str(p_tag))
     if address_pars:
-        composite_address = "\n".join(f"<p>{p}</p>" for p in address_pars)
-        record["address"] = [composite_address]
+        record["address"] = ["\n".join(address_pars)]
     else:
         record["address"] = []
 
-    # 6) Blog link
+    # 6) Blog link extraction
     linkink = ""
     dossier_card = soup.find('div', class_='human-dossier-card')
     if dossier_card:
@@ -334,7 +376,8 @@ def scrape_one_id(page_id, url):
         if blog_a:
             linkink = blog_a.get('href', '').strip()
     record["linkink"] = linkink
-    # 7) Image
+
+    # 7) Image extraction and download
     record["imageUrl"] = ""
     record["imageFilename"] = ""
     image_div = soup.find('div', class_='human-dossier-card__img')
@@ -360,6 +403,7 @@ def scrape_one_id(page_id, url):
         except Exception as e:
             log_error(f"[SCRAPE] Error downloading image for ID={page_id}: {e}")
     return record
+
 
 def scrape_new_ids(new_ids, csv_file):
     ensure_images_dir()
@@ -743,7 +787,7 @@ def extract_address_items(text_div):
 def update_new_features_with_telegram(features):
     """
     Scrape Telegram live and update ANY feature (old or new) whose sourceUrl matches a Telegram link.
-    Also, save the new Telegram data into a JSON file.
+    Also, save the new Telegram data into a JSON file and re-geocode features that were updated.
     """
     existing_file, existing_date = get_latest_telegram_address_file()
     if existing_date is not None:
@@ -764,6 +808,8 @@ def update_new_features_with_telegram(features):
         logger.info("Saved new Telegram addresses to %s", new_file)
     except Exception as e:
         logger.error("Error saving Telegram addresses file: %s", e)
+    # Load reference data for geocoding
+    ref_dict = load_reference_geojson(REFERENCE_GEOJSON_FILE)
     for item in telegram_items:
         t_link = normalize_url(item.get("link", ""))
         t_postcode = item.get("postcode", "").strip()
@@ -778,8 +824,12 @@ def update_new_features_with_telegram(features):
                 props["address"] = [t_address]
                 props["geocodeStatus"] = "Telegram updated"
                 feat["properties"] = props
-                logger.info("Updated feature ID=%s from Telegram: postcode '%s' -> '%s', address '%s' -> '%s'",
-                            props.get("ID", ""), old_postcode, t_postcode, old_address, [t_address])
+                # Re-geocode the feature based on its updated address
+                updated_feat = geocode_feature(feat, ref_dict)
+                feat.update(updated_feat)
+                logger.info("Updated feature ID=%s from Telegram: postcode '%s' -> '%s', address '%s' -> '%s', new coords: %s",
+                            props.get("ID", ""), old_postcode, t_postcode, old_address, [t_address],
+                            feat.get("geometry", {}).get("coordinates"))
 
 # -----------------------------------------------------------------------------
 # 7) REMOVE UNUSED IMAGES
