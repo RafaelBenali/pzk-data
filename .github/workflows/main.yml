@@ -2,7 +2,7 @@ name: Daily POST Request with Heartbeat
 
 on:
   schedule:
-    - cron: '30 6 * * *'   
+    - cron: '10 20 * * *'   
   workflow_dispatch:
 
 jobs:
