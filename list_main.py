@@ -459,155 +459,234 @@ def fuzzy_match(candidate, choices):
         return match_res[0], match_res[1]
     return None, 0
 
+def geocode_feature(feature, ref_dict):
+    try:
+        props = feature.get("properties", {})
+        page_id = props.get("ID", "")
+        rec_postcode = props.get("postcode", "").strip() if "postcode" in props else ""
+        chosen_coords = FALLBACK_COORDS[:]
+        geo_status = "pending"
+        address_field = props.get("address", [])
+        candidate_text = " ".join(address_field) if isinstance(address_field, list) else str(address_field)
+        
+        if not rec_postcode:
+            geo_status = "rf"
+            chosen_coords = FALLBACK_COORDS
+            logger.info(f"[GEO] ID={page_id} => No postcode => geocodeStatus=rf => coords={chosen_coords}")
+        else:
+            if rec_postcode not in ref_dict:
+                geo_status = "Индекс не найден"
+                chosen_coords = FALLBACK_COORDS
+                logger.info(f"[GEO] ID={page_id} => Postcode '{rec_postcode}' not in reference => coords={chosen_coords}")
+            else:
+                candidates = ref_dict[rec_postcode]
+                if len(candidates) == 1:
+                    cfeat, ctxt = candidates[0]
+                    coords = cfeat.get("geometry", {}).get("coordinates", [])
+                    if coords and len(coords) == 2:
+                        chosen_coords = coords
+                        geo_status = "True"
+                        logger.info(f"[GEO] ID={page_id} => Single match => coords={chosen_coords} => geocodeStatus=True")
+                    else:
+                        geo_status = "Индекс не найден"
+                        logger.info(f"[GEO] ID={page_id} => Single match but no valid coords => fallback => geocodeStatus={geo_status}")
+                else:
+                    # Multiple candidates for this postcode - use fuzzy matching
+                    best_str, best_score = fuzzy_match(candidate_text, [x[1] for x in candidates])
+                    logger.info(f"[GEO] ID={page_id} => Multiple candidates => bestStr='{best_str}', score={best_score}")
+                    
+                    # Always use best match coordinates but mark for verification
+                    chosen_ref = next((rfeat for (rfeat, rtxt) in candidates if rtxt == best_str), None)
+                    if chosen_ref:
+                        coords = chosen_ref.get("geometry", {}).get("coordinates", [])
+                        if coords and len(coords) == 2:
+                            chosen_coords = coords
+                            geo_status = "Требуется проверка"
+                            logger.info(f"[GEO] ID={page_id} => Using best match coords (score={best_score}) => geocodeStatus={geo_status}")
+                        else:
+                            geo_status = "Индекс не найден"
+                            logger.info(f"[GEO] ID={page_id} => Best match has no valid coords => fallback => geocodeStatus={geo_status}")
+                    else:
+                        geo_status = "Требуется проверка"
+                        logger.info(f"[GEO] ID={page_id} => Could not find feature for bestStr => geocodeStatus={geo_status}")
+        
+        feature["geometry"]["coordinates"] = chosen_coords
+        props["geocodeStatus"] = geo_status
+        feature["properties"] = props
+        return feature
+    except Exception as e:
+        log_error(f"[GEO] Error geocoding ID={props.get('ID','')}: {e}")
+        props["geocodeStatus"] = f"Error: {e}"
+        feature["properties"] = props
+        return feature
+
 def geocode_new_features(features, ref_dict):
     for feat in features:
         try:
-            props = feat.get("properties", {})
-            page_id = props.get("ID", "")
-            rec_postcode = props.get("postcode", "").strip() if "postcode" in props else ""
-            chosen_coords = FALLBACK_COORDS[:]
-            geo_status = "pending"
-            address_field = props.get("address", [])
-            candidate_text = " ".join(address_field) if isinstance(address_field, list) else str(address_field)
-            if not rec_postcode:
-                geo_status = "rf"
-                chosen_coords = FALLBACK_COORDS
-                logger.info(f"[GEO] ID={page_id} => No postcode => geocodeStatus=rf => coords={chosen_coords}")
-            else:
-                if rec_postcode not in ref_dict:
-                    geo_status = "Индекс не найден"
-                    chosen_coords = FALLBACK_COORDS
-                    logger.info(f"[GEO] ID={page_id} => Postcode '{rec_postcode}' not in reference => coords={chosen_coords}")
-                else:
-                    candidates = ref_dict[rec_postcode]
-                    if len(candidates) == 1:
-                        cfeat, ctxt = candidates[0]
-                        coords = cfeat.get("geometry", {}).get("coordinates", [])
-                        if coords and len(coords) == 2:
-                            chosen_coords = coords
-                            geo_status = "True"
-                            logger.info(f"[GEO] ID={page_id} => Single match => coords={chosen_coords} => geocodeStatus=True")
-                        else:
-                            geo_status = "Индекс не найден"
-                            logger.info(f"[GEO] ID={page_id} => Single match but no valid coords => fallback => geocodeStatus={geo_status}")
-                    else:
-                        if INTERACTIVE_MODE:
-                            print(f"\n-- Manual Check for ID={page_id} --")
-                            print(f"Original Address: {candidate_text}")
-                            for i, (candidate_feat, candidate_text_candidate) in enumerate(candidates):
-                                this_score = fuzz.token_sort_ratio(candidate_text, candidate_text_candidate)
-                                print(f"  [{i}] Score={this_score} => {candidate_text_candidate}")
-                            user_input = input("Choose index [or press Enter to skip]: ").strip()
-                            if user_input.isdigit():
-                                pick_idx = int(user_input)
-                                if 0 <= pick_idx < len(candidates):
-                                    pick_feat = candidates[pick_idx][0]
-                                    coords = pick_feat.get("geometry", {}).get("coordinates", [])
-                                    if coords and len(coords) == 2:
-                                        chosen_coords = coords
-                                        geo_status = "True"
-                                        print(f"Chosen index: {pick_idx}, coords={coords}, status=True")
-                                        logger.info(f"[GEO] ID={page_id} => user-chosen index={pick_idx} => coords={coords}, geocodeStatus=True")
-                                    else:
-                                        print("No coords in that feature, fallback used.")
-                                        logger.info(f"[GEO] ID={page_id} => user-chosen index={pick_idx}, but no coords => fallback used")
-                                else:
-                                    print("Invalid index, fallback used.")
-                            else:
-                                print("No index chosen, fallback used.")
-                            if geo_status != "True":
-                                best_str, best_score = fuzzy_match(candidate_text, [x[1] for x in candidates])
-                                if best_str and best_score >= FUZZY_THRESHOLD:
-                                    chosen_ref = next((rfeat for (rfeat, rtxt) in candidates if rtxt == best_str), None)
-                                    if chosen_ref:
-                                        coords = chosen_ref.get("geometry", {}).get("coordinates", [])
-                                        if coords and len(coords) == 2:
-                                            chosen_coords = coords
-                                            geo_status = "True"
-                                            logger.info(f"[GEO] ID={page_id} => Fuzzy matched coords={chosen_coords} => geocodeStatus=True")
-                                        else:
-                                            geo_status = "Индекс не найден"
-                                            logger.info(f"[GEO] ID={page_id} => Fuzzy matched but coords missing => fallback => geocodeStatus={geo_status}")
-                                    else:
-                                        geo_status = "Требуется проверка"
-                                        logger.info(f"[GEO] ID={page_id} => Could not find feature for bestStr => geocodeStatus={geo_status}")
-                                else:
-                                    geo_status = "Требуется проверка"
-                                    logger.info(f"[GEO] ID={page_id} => Fuzzy score < {FUZZY_THRESHOLD} => fallback => geocodeStatus={geo_status}")
-                        else:
-                            best_str, best_score = fuzzy_match(candidate_text, [x[1] for x in candidates])
-                            logger.info(f"[GEO] ID={page_id} => Multiple candidates => bestStr='{best_str}', score={best_score}")
-                            if best_str and best_score >= FUZZY_THRESHOLD:
-                                chosen_ref = next((rfeat for (rfeat, rtxt) in candidates if rtxt == best_str), None)
-                                if chosen_ref:
-                                    coords = chosen_ref.get("geometry", {}).get("coordinates", [])
-                                    if coords and len(coords) == 2:
-                                        chosen_coords = coords
-                                        geo_status = "True"
-                                        logger.info(f"[GEO] ID={page_id} => Fuzzy matched coords={chosen_coords} => geocodeStatus=True")
-                                    else:
-                                        geo_status = "Индекс не найден"
-                                        logger.info(f"[GEO] ID={page_id} => Fuzzy matched but coords missing => fallback => geocodeStatus={geo_status}")
-                                else:
-                                    geo_status = "Требуется проверка"
-                                    logger.info(f"[GEO] ID={page_id} => Could not find feature for bestStr => geocodeStatus={geo_status}")
-                            else:
-                                geo_status = "Требуется проверка"
-                                logger.info(f"[GEO] ID={page_id} => Fuzzy score < {FUZZY_THRESHOLD} => fallback => geocodeStatus={geo_status}")
-            feat["geometry"]["coordinates"] = chosen_coords
-            props["geocodeStatus"] = geo_status
-            feat["properties"] = props
+            geocode_feature(feat, ref_dict)
         except Exception as e:
-            log_error(f"[GEO] Error processing ID={props.get('ID', '')}: {e}")
-            props["geocodeStatus"] = f"Error: {e}"
-            feat["properties"] = props
-        # End try/except for this feature
+            log_error(f"[GEO] Error processing feature: {e}")
     return features
 
 # -----------------------------------------------------------------------------
 # 6) DATE CLEANING (plus POSTCODE extraction) -- applied only to new features
 # -----------------------------------------------------------------------------
 RUSSIAN_MONTHS = {
-    'января': '01',
-    'февраля': '02',
-    'марта': '03',
-    'апреля': '04',
-    'мая': '05',
-    'июня': '06',
-    'июля': '07',
-    'августа': '08',
-    'сентября': '09',
-    'октября': '10',
-    'ноября': '11',
-    'декабря': '12'
+    'января': '01', 'январь': '01', 'январе': '01', 'янв': '01',
+    'февраля': '02', 'февраль': '02', 'феврале': '02', 'фев': '02',
+    'марта': '03', 'март': '03', 'марте': '03', 'мар': '03',
+    'апреля': '04', 'апрель': '04', 'апреле': '04', 'апр': '04',
+    'мая': '05', 'май': '05', 'мае': '05',
+    'июня': '06', 'июнь': '06', 'июне': '06', 'июн': '06',
+    'июля': '07', 'июль': '07', 'июле': '07', 'июл': '07',
+    'августа': '08', 'август': '08', 'августе': '08', 'авг': '08',
+    'сентября': '09', 'сентябрь': '09', 'сентябре': '09', 'сен': '09', 'сент': '09',
+    'октября': '10', 'октябрь': '10', 'октябре': '10', 'окт': '10',
+    'ноября': '11', 'ноябрь': '11', 'ноябре': '11', 'ноя': '11', 'нояб': '11',
+    'декабря': '12', 'декабрь': '12', 'декабре': '12', 'дек': '12'
 }
 
-def process_russian_date(raw):
-    txt = raw.strip()
-    txt = re.sub(r'^[^\d]*', '', txt).strip()
-    day = '01'
-    m1 = re.search(r'(\d{1,2})\s+([а-яА-Я]+)\s+(\d{4})', txt)
-    if m1:
-        day = m1.group(1)
-        month_word = m1.group(2).lower()
-        year = m1.group(3)
-    else:
-        m2 = re.search(r'([а-яА-Я]+)\s+(\d{4})', txt)
-        if m2:
-            month_word = m2.group(1).lower()
-            year = m2.group(2)
-        else:
-            return None, "Date parsing failed"
-    month = RUSSIAN_MONTHS.get(month_word)
-    if not month:
-        return None, f"Unknown month: {month_word}"
-    day = day.zfill(2)
-    return f"{day}/{month}/{year}", "True"
+def extract_and_process_date(text):
+    """
+    Extract date information from any text with sophisticated pattern matching.
+    Prioritizes detention dates over birth dates.
+    Returns:
+        tuple: (formatted_date, status, raw_text)
+    """
+    if not text:
+        return None, "Ожидание", ""
+    
+    # Clean HTML tags and normalize whitespace
+    clean_text = re.sub(r'<[^>]+>', ' ', text)
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+    
+    # Check for explicit "unknown detention date" statements
+    if re.search(r'[Дд]ата\s+задержания\s+неизвестна', clean_text):
+        return None, "Ожидание", "Дата задержания неизвестна"
+    
+    # First, split the text into sentences to separate birth dates from detention dates
+    sentences = re.split(r'[\.!?;]', clean_text)
+    
+    # Identify birth date sentences to exclude them
+    filtered_sentences = []
+    
+    for sentence in sentences:
+        sentence = sentence.strip()
+        # Skip empty sentences and birth date references
+        if not sentence or re.search(r'родил(?:ся|ась)', sentence, re.IGNORECASE):
+            continue
+        filtered_sentences.append(sentence)
+    
+    # Reconstruct text without birth date sentences
+    filtered_text = '. '.join(filtered_sentences)
+    
+    # Patterns for finding detention dates - sorted by priority
+    detention_patterns = [
+        # Direct mention of being deprived of freedom with date
+        r'(?:лишён\s+свободы|лишена\s+свободы)(?:\s+с)?\s+(\d{1,2})\s+([а-яА-Я]+)\s+(\d{4})',
+        
+        # Explicit detention with date
+        r'(?:задержан|арестован|взят\s+под\s+стражу|отправлен[а]?\s+под\s+(?:домашний\s+)?арест|взят\s+в\s+плен)[^\.]{1,100}?(\d{1,2})\s+([а-яА-Я]+)\s+(\d{4})',
+        
+        # Deprivation of freedom with season and year
+        r'(?:лишён\s+свободы|лишена\s+свободы)(?:\s+с)?\s+(?:предположительно\s+)?(?:с\s+)?(весн[аы]|лет[оа]м|осен[иь]|зим[аы])\s+(\d{4})',
+        
+        # Detention with season and year
+        r'(?:задержан|арестован|взят\s+в\s+плен)[^\.]{1,100}?(весн[аы]|лет[оа]м|осен[иь]|зим[аы])\s+(\d{4})',
+        
+        # Deprivation of freedom with month and year
+        r'(?:лишён\s+свободы|лишена\s+свободы)(?:\s+с)?\s+(?:предположительно\s+)?(?:с\s+)?([а-яА-Я]+)\s+(\d{4})',
+        
+        # Detention with month and year
+        r'(?:задержан|арестован|взят\s+под\s+стражу|отправлен[а]?\s+под\s+(?:домашний\s+)?арест|взят\s+в\s+плен)[^\.]{1,100}?([а-яА-Я]+)\s+(\d{4})',
+        
+        # "With/since" time markers
+        r'(?:с|находится\s+под\s+стражей\s+с)[^\.]{1,50}?(\d{1,2})\s+([а-яА-Я]+)\s+(\d{4})',
+        r'(?:с|находится\s+под\s+стражей\s+с)[^\.]{1,50}?([а-яА-Я]+)\s+(\d{4})',
+        
+        # Year only patterns
+        r'(?:лишён\s+свободы|лишена\s+свободы|задержан|арестован|взят\s+в\s+плен)[^\.]{1,100}?в\s+(\d{4})\s+году',
+    ]
+    
+    # First search in the filtered text (without birth dates)
+    for pattern in detention_patterns:
+        match = re.search(pattern, filtered_text, re.IGNORECASE)
+        if match:
+            groups = match.groups()
+            
+            # Handle different pattern matches
+            if len(groups) == 3:  # Day, month, year
+                day = groups[0].zfill(2)
+                month_word = groups[1].lower()
+                year = groups[2]
+                month = RUSSIAN_MONTHS.get(month_word)
+                if month:
+                    return f"{day}/{month}/{year}", "True", match.group(0)
+            elif len(groups) == 2:
+                # Check if first group is a season
+                season_pattern = groups[0].lower()
+                season_base = ""
+                
+                # Normalize season words to their base form
+                if re.match(r'весн[аы]', season_pattern):
+                    season_base = 'весна'
+                elif re.match(r'лет[оа]м', season_pattern):
+                    season_base = 'лето'
+                elif re.match(r'осен[иь]', season_pattern):
+                    season_base = 'осень'
+                elif re.match(r'зим[аы]', season_pattern):
+                    season_base = 'зима'
+                
+                if season_base:
+                    year = groups[1]
+                    # Map seasons to first month of each season
+                    season_map = {
+                        'весна': '03',
+                        'лето': '06', 
+                        'осень': '09',
+                        'зима': '12'
+                    }
+                    month = season_map.get(season_base, '01')
+                    return f"01/{month}/{year}", "Требуется проверка", match.group(0)
+                # Check if first group is a month
+                elif any(m_pat in groups[0].lower() for m_pat in RUSSIAN_MONTHS.keys()):
+                    for month_pattern, month_code in RUSSIAN_MONTHS.items():
+                        if month_pattern in groups[0].lower():
+                            month = month_code
+                            year = groups[1]
+                            return f"01/{month}/{year}", "Требуется проверка", match.group(0)
+                # Must be year only
+                else:
+                    year = groups[0]
+                    return f"01/01/{year}", "Требуется проверка", match.group(0)
+    
+    # Secondary patterns (lower priority)
+    secondary_patterns = [
+        # Look for sentencing dates (which often precede detention dates)
+        r'приговорён.*?(\d{1,2})\s+([а-яА-Я]+)\s+(\d{4})',
+        r'осужден.*?(\d{1,2})\s+([а-яА-Я]+)\s+(\d{4})',
+    ]
+    
+    for pattern in secondary_patterns:
+        match = re.search(pattern, filtered_text, re.IGNORECASE)
+        if match:
+            groups = match.groups()
+            if len(groups) == 3:  # Day, month, year
+                day = groups[0].zfill(2)
+                month_word = groups[1].lower()
+                year = groups[2]
+                month = RUSSIAN_MONTHS.get(month_word)
+                if month:
+                    return f"{day}/{month}/{year}", "Требуется проверка", match.group(0)
+    
+    # No date patterns found
+    return None, "Ожидание", ""
 
 def date_cleaning_all_features(features):
     for feat in features:
         props = feat.get("properties", {})
-        # 1) Postcode extraction from address
+        
+        # 1) Postcode extraction from address - keep this part as is
         address_list = props.get("address", [])
         p_code = ""
         p_status = "Ожидание"
@@ -627,27 +706,26 @@ def date_cleaning_all_features(features):
         props["postcode"] = p_code
         props["postcodeStatus"] = p_status
 
-        # 2) Date extraction from last sentence of main content
+        # 2) Enhanced date extraction from main content
         paragraphs = props.get("main", [])
         d_str = ""
         d_status = "Ожидание"
+        raw_date_data = ""
+        
         if paragraphs:
+            # Try to find date in all paragraphs, prioritizing strongest matches
             combo = ' '.join(paragraphs)
-            sentences = [s.strip() for s in combo.split('.') if s.strip()]
-            if sentences:
-                last_sent = sentences[-1]
-                last_sent = re.sub(r'</(b|strong)>\s*', '', last_sent)
-                last_sent = re.sub(r'<[^>]+>', '', last_sent).strip()
-                last_sent = re.sub(r'\s+года$', '', last_sent).strip()
-                last_sent = re.sub(r'^с\s+', '', last_sent, flags=re.IGNORECASE).strip()
-                parsed, status_msg = process_russian_date(last_sent)
-                if parsed:
-                    d_str = parsed
-                    d_status = "True"
+            date_result, status, raw_date = extract_and_process_date(combo)
+            
+            if date_result:
+                d_str = date_result
+                d_status = status
+                raw_date_data = raw_date
+        
         props["date"] = d_str
         props["dateStatus"] = d_status
-        if "dateRawData" in props:
-            del props["dateRawData"]
+        props["dateRawData"] = raw_date_data
+        
         feat["properties"] = props
 
 # -----------------------------------------------------------------------------
@@ -787,7 +865,7 @@ def extract_address_items(text_div):
 def update_new_features_with_telegram(features):
     """
     Scrape Telegram live and update ANY feature (old or new) whose sourceUrl matches a Telegram link.
-    Also, save the new Telegram data into a JSON file and re-geocode features that were updated.
+    Also, save the new Telegram data into a JSON file but only re-geocode features that were updated.
     """
     existing_file, existing_date = get_latest_telegram_address_file()
     if existing_date is not None:
@@ -796,11 +874,19 @@ def update_new_features_with_telegram(features):
     else:
         cutoff = datetime.min.replace(tzinfo=timezone.utc)
         logger.info("No existing Telegram address file found. Using no cutoff.")
+    
     result = scrape_telegram_addresses(min_date=cutoff)
     if result is None:
         logger.info("No new Telegram posts to update features.")
         return
+    
     post_time, telegram_items = result
+    
+    # If no items in the new posts, don't proceed with updates
+    if not telegram_items:
+        logger.info("Telegram posts found but contain no matching address items. Skipping updates.")
+        return
+        
     new_file = os.path.join(PERSISTENT_DIR, f"address_{post_time.strftime('%d-%m-%Y')}.json")
     try:
         with open(new_file, "w", encoding="utf-8") as f:
@@ -808,28 +894,48 @@ def update_new_features_with_telegram(features):
         logger.info("Saved new Telegram addresses to %s", new_file)
     except Exception as e:
         logger.error("Error saving Telegram addresses file: %s", e)
+    
     # Load reference data for geocoding
     ref_dict = load_reference_geojson(REFERENCE_GEOJSON_FILE)
+    
+    # Track if any features were actually updated
+    updates_made = False
+    
     for item in telegram_items:
         t_link = normalize_url(item.get("link", ""))
         t_postcode = item.get("postcode", "").strip()
         t_address = item.get("address", "").strip()
+        
         for feat in features:
             props = feat.get("properties", {})
             source_url = props.get("sourceUrl", "")
+            
             if normalize_url(source_url) == t_link:
+                # Track old values for comparison
                 old_postcode = props.get("postcode", "")
                 old_address = props.get("address", [])
-                props["postcode"] = t_postcode
-                props["address"] = [t_address]
-                props["geocodeStatus"] = "Telegram updated"
-                feat["properties"] = props
-                # Re-geocode the feature based on its updated address
-                updated_feat = geocode_feature(feat, ref_dict)
-                feat.update(updated_feat)
-                logger.info("Updated feature ID=%s from Telegram: postcode '%s' -> '%s', address '%s' -> '%s', new coords: %s",
-                            props.get("ID", ""), old_postcode, t_postcode, old_address, [t_address],
-                            feat.get("geometry", {}).get("coordinates"))
+                
+                # Only update if there's a change
+                if old_postcode != t_postcode or (isinstance(old_address, list) and 
+                                               (not old_address or old_address[0] != t_address)):
+                    props["postcode"] = t_postcode
+                    props["address"] = [t_address]
+                    props["geocodeStatus"] = "Telegram updated"
+                    feat["properties"] = props
+                    
+                    # Re-geocode the feature based on its updated address
+                    updated_feat = geocode_feature(feat, ref_dict)
+                    feat.update(updated_feat)
+                    
+                    logger.info("Updated feature ID=%s from Telegram: postcode '%s' -> '%s', address '%s' -> '%s', new coords: %s",
+                                props.get("ID", ""), old_postcode, t_postcode, old_address, [t_address],
+                                feat.get("geometry", {}).get("coordinates"))
+                    updates_made = True
+                else:
+                    logger.info("Feature ID=%s matched Telegram item but no changes needed", props.get("ID", ""))
+    
+    if not updates_made:
+        logger.info("No features were updated from Telegram data.")
 
 # -----------------------------------------------------------------------------
 # 7) REMOVE UNUSED IMAGES
@@ -892,110 +998,6 @@ def find_id(query):
         return {"found_ids": matches}
     else:
         return {"message": f"No matching IDs found for query: {query}"}
-
-def geocode_feature(feature, ref_dict):
-    try:
-        props = feature.get("properties", {})
-        page_id = props.get("ID", "")
-        rec_postcode = props.get("postcode", "").strip() if "postcode" in props else ""
-        chosen_coords = FALLBACK_COORDS[:]
-        geo_status = "pending"
-        address_field = props.get("address", [])
-        candidate_text = " ".join(address_field) if isinstance(address_field, list) else str(address_field)
-        if not rec_postcode:
-            geo_status = "rf"
-            chosen_coords = FALLBACK_COORDS
-            logger.info(f"[GEO] ID={page_id} => No postcode => geocodeStatus=rf => coords={chosen_coords}")
-        else:
-            if rec_postcode not in ref_dict:
-                geo_status = "Индекс не найден"
-                chosen_coords = FALLBACK_COORDS
-                logger.info(f"[GEO] ID={page_id} => Postcode '{rec_postcode}' not in reference => coords={chosen_coords}")
-            else:
-                candidates = ref_dict[rec_postcode]
-                if len(candidates) == 1:
-                    cfeat, ctxt = candidates[0]
-                    coords = cfeat.get("geometry", {}).get("coordinates", [])
-                    if coords and len(coords) == 2:
-                        chosen_coords = coords
-                        geo_status = "True"
-                        logger.info(f"[GEO] ID={page_id} => Single match => coords={chosen_coords} => geocodeStatus=True")
-                    else:
-                        geo_status = "Индекс не найден"
-                        logger.info(f"[GEO] ID={page_id} => Single match but no valid coords => fallback => geocodeStatus={geo_status}")
-                else:
-                    if INTERACTIVE_MODE:
-                        print(f"\n-- Manual Check for ID={page_id} --")
-                        print(f"Original Address: {candidate_text}")
-                        for i, (candidate_feat, candidate_text_candidate) in enumerate(candidates):
-                            this_score = fuzz.token_sort_ratio(candidate_text, candidate_text_candidate)
-                            print(f"  [{i}] Score={this_score} => {candidate_text_candidate}")
-                        user_input = input("Choose index [or press Enter to skip]: ").strip()
-                        if user_input.isdigit():
-                            pick_idx = int(user_input)
-                            if 0 <= pick_idx < len(candidates):
-                                pick_feat = candidates[pick_idx][0]
-                                coords = pick_feat.get("geometry", {}).get("coordinates", [])
-                                if coords and len(coords) == 2:
-                                    chosen_coords = coords
-                                    geo_status = "True"
-                                    print(f"Chosen index: {pick_idx}, coords={coords}, status=True")
-                                    logger.info(f"[GEO] ID={page_id} => user-chosen index={pick_idx} => coords={coords}, geocodeStatus=True")
-                                else:
-                                    print("No coords in that feature, fallback used.")
-                                    logger.info(f"[GEO] ID={page_id} => user-chosen index={pick_idx}, but no coords => fallback used")
-                            else:
-                                print("Invalid index, fallback used.")
-                        else:
-                            print("No index chosen, fallback used.")
-                        if geo_status != "True":
-                            best_str, best_score = fuzzy_match(candidate_text, [x[1] for x in candidates])
-                            if best_str and best_score >= FUZZY_THRESHOLD:
-                                chosen_ref = next((rfeat for (rfeat, rtxt) in candidates if rtxt == best_str), None)
-                                if chosen_ref:
-                                    coords = chosen_ref.get("geometry", {}).get("coordinates", [])
-                                    if coords and len(coords) == 2:
-                                        chosen_coords = coords
-                                        geo_status = "True"
-                                        logger.info(f"[GEO] ID={page_id} => Fuzzy matched coords={chosen_coords} => geocodeStatus=True")
-                                    else:
-                                        geo_status = "Индекс не найден"
-                                        logger.info(f"[GEO] ID={page_id} => Fuzzy matched but coords missing => fallback => geocodeStatus={geo_status}")
-                                else:
-                                    geo_status = "Требуется проверка"
-                                    logger.info(f"[GEO] ID={page_id} => Could not find feature for bestStr => geocodeStatus={geo_status}")
-                            else:
-                                geo_status = "Требуется проверка"
-                                logger.info(f"[GEO] ID={page_id} => Fuzzy score < {FUZZY_THRESHOLD} => fallback => geocodeStatus={geo_status}")
-                    else:
-                        best_str, best_score = fuzzy_match(candidate_text, [x[1] for x in candidates])
-                        logger.info(f"[GEO] ID={page_id} => Multiple candidates => bestStr='{best_str}', score={best_score}")
-                        if best_str and best_score >= FUZZY_THRESHOLD:
-                            chosen_ref = next((rfeat for (rfeat, rtxt) in candidates if rtxt == best_str), None)
-                            if chosen_ref:
-                                coords = chosen_ref.get("geometry", {}).get("coordinates", [])
-                                if coords and len(coords) == 2:
-                                    chosen_coords = coords
-                                    geo_status = "True"
-                                    logger.info(f"[GEO] ID={page_id} => Fuzzy matched coords={chosen_coords} => geocodeStatus=True")
-                                else:
-                                    geo_status = "Индекс не найден"
-                                    logger.info(f"[GEO] ID={page_id} => Fuzzy matched but coords missing => fallback => geocodeStatus={geo_status}")
-                            else:
-                                geo_status = "Требуется проверка"
-                                logger.info(f"[GEO] ID={page_id} => Could not find feature for bestStr => geocodeStatus={geo_status}")
-                        else:
-                            geo_status = "Требуется проверка"
-                            logger.info(f"[GEO] ID={page_id} => Fuzzy score < {FUZZY_THRESHOLD} => fallback => geocodeStatus={geo_status}")
-        feature["geometry"]["coordinates"] = chosen_coords
-        props["geocodeStatus"] = geo_status
-        feature["properties"] = props
-        return feature
-    except Exception as e:
-        log_error(f"[GEO] Error geocoding ID={props.get('ID','')}: {e}")
-        props["geocodeStatus"] = f"Error: {e}"
-        feature["properties"] = props
-        return feature
 
 def manual_geocode(feature_id):
     latest_geojson_file = get_latest_geojson()
@@ -1134,12 +1136,7 @@ def main():
         logger.info("New Features Summary: PostcodeStatus: %s", new_postcode_status)
         logger.info("New Features Summary: GeocodeStatus: %s", new_geocode_status)
         logger.info("New Features Summary: DateStatus: %s", new_date_status)
-        # (H.5) Auto-generate overrides.json for new features
-        new_ids_list = [str(feat.get("properties", {}).get("ID", "")) for feat in new_features if feat.get("properties", {}).get("ID", "")]
-        if new_ids_list:
-            new_ids_str = ",".join(new_ids_list)
-            gen_result = generate_overrides(new_ids_str)
-            logger.info(f"Generated overrides: {gen_result}")
+        # No longer auto-generating overrides.json
 
     # Generate manifest.json without markerImages
     manifest = {
@@ -1236,6 +1233,94 @@ def update_date_route():
         return jsonify({"error": f"Feature with ID {feature_id} not found."}), 404
     save_geojson(geojson_data, latest_geojson_file)
     return jsonify({"message": f"Updated date for feature ID {feature_id}."})
+
+# New route to manually trigger Telegram updates
+@app.route("/update_from_telegram", methods=["POST"])
+def update_from_telegram_route():
+    """
+    Update existing features using the latest Telegram address file.
+    This endpoint allows manual triggering of Telegram updates.
+    """
+    data = request.get_json() or {}
+    force_update = data.get("force", False)
+    
+    try:
+        # Get latest GeoJSON file
+        latest_geojson_file = get_latest_geojson()
+        if not latest_geojson_file:
+            return jsonify({"error": "No GeoJSON file found to update."}), 404
+        
+        # Load the GeoJSON data
+        geojson_data = load_geojson(latest_geojson_file)
+        
+        # Get latest Telegram file
+        telegram_file, telegram_date = get_latest_telegram_address_file()
+        if not telegram_file:
+            return jsonify({"error": "No Telegram address file found."}), 404
+        
+        # Load the Telegram data
+        try:
+            with open(telegram_file, 'r', encoding='utf-8') as f:
+                telegram_items = json.load(f)
+        except Exception as e:
+            return jsonify({"error": f"Error loading Telegram file: {e}"}), 500
+        
+        # Load reference data for geocoding
+        ref_dict = load_reference_geojson(REFERENCE_GEOJSON_FILE)
+        
+        # Track updates
+        updates_made = 0
+        features_processed = 0
+        
+        # Update features with Telegram data
+        for item in telegram_items:
+            t_link = normalize_url(item.get("link", ""))
+            t_postcode = item.get("postcode", "").strip()
+            t_address = item.get("address", "").strip()
+            
+            for feat in geojson_data.get("features", []):
+                features_processed += 1
+                props = feat.get("properties", {})
+                source_url = props.get("sourceUrl", "")
+                
+                if normalize_url(source_url) == t_link:
+                    # Check if we should update
+                    old_postcode = props.get("postcode", "")
+                    old_address = props.get("address", [])
+                    
+                    # Update if forced or if there's a change
+                    if force_update or old_postcode != t_postcode or (isinstance(old_address, list) and 
+                                                 (not old_address or old_address[0] != t_address)):
+                        props["postcode"] = t_postcode
+                        props["address"] = [t_address]
+                        props["geocodeStatus"] = "Telegram updated"
+                        feat["properties"] = props
+                        
+                        # Re-geocode the feature based on its updated address
+                        updated_feat = geocode_feature(feat, ref_dict)
+                        feat.update(updated_feat)
+                        
+                        updates_made += 1
+                        logger.info(f"Manual update from Telegram - ID={props.get('ID', '')}: postcode '{old_postcode}' -> '{t_postcode}', address updated, new coords: {feat.get('geometry', {}).get('coordinates')}")
+        
+        # Only save if updates were made
+        if updates_made > 0:
+            save_geojson(geojson_data, latest_geojson_file)
+            return jsonify({
+                "message": f"Telegram updates applied from {telegram_file}",
+                "features_processed": features_processed,
+                "features_updated": updates_made
+            })
+        else:
+            return jsonify({
+                "message": "No features needed updating",
+                "features_processed": features_processed,
+                "features_updated": 0
+            })
+        
+    except Exception as e:
+        logger.exception("Error in manual Telegram update")
+        return jsonify({"error": str(e)}), 500
 
 # -----------------------------------------------------------------------------
 # Static File Endpoints
